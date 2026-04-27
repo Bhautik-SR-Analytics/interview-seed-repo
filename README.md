@@ -2,13 +2,28 @@
 
 A small Express + Postgres app representing a slice of our analytics platform.
 
+## Prerequisites
+
+- Node 20+
+- A running Postgres 14+ (local install, brew service, hosted — your choice)
+
 ## Setup
 
 ```bash
-docker compose up -d
-cp .env.example .env
+# 1. Create a database
+createdb beast_interview
+
+# 2. Apply the schema
+psql -d beast_interview -f db/01_schema.sql
+
+# 3. Point the app at your DB
+cp .env.example .env       # then edit DATABASE_URL
+
+# 4. Install deps and seed data (~10k rows across 3 clients)
 npm install
 npm run seed
+
+# 5. Run
 npm start
 ```
 
