@@ -19,7 +19,7 @@ psql -d beast_interview -f db/01_schema.sql
 # 3. Point the app at your DB
 cp .env.example .env       # then edit DATABASE_URL
 
-# 4. Install deps and seed data (~10k rows across 3 clients)
+# 4. Install deps and seed data (~2M rows across 3 clients; takes a minute)
 npm install
 npm run seed
 

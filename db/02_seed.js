@@ -1,4 +1,4 @@
-// Seeds clients, bin_lookup, payments, and ~10k orders across 3 tenants.
+// Seeds clients, bin_lookup, payments, and ~2M orders across 3 tenants.
 // Idempotent: TRUNCATEs first.
 
 require('dotenv').config();
@@ -57,9 +57,15 @@ const DECLINE_REASONS = [
   'Issuer Unavailable',
 ];
 
-// Distribution: 6k / 3k / 1k across the three tenants. ~70% approval rate overall,
-// but with non-uniform skew per BIN so the analytics endpoint surfaces interesting variance.
-const ROW_COUNTS = { 10001: 6000, 10002: 3000, 10003: 1000 };
+// Distribution: 1.2M / 600k / 200k across the three tenants (~2M total).
+// Approval rate is biased per BIN so the analytics endpoint surfaces variance.
+// Override total via SEED_ROWS env (split is preserved proportionally).
+const TOTAL_ROWS = parseInt(process.env.SEED_ROWS, 10) || 2_000_000;
+const ROW_COUNTS = {
+  10001: Math.round(TOTAL_ROWS * 0.6),
+  10002: Math.round(TOTAL_ROWS * 0.3),
+  10003: TOTAL_ROWS - Math.round(TOTAL_ROWS * 0.6) - Math.round(TOTAL_ROWS * 0.3),
+};
 
 function pick(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
@@ -101,15 +107,18 @@ async function seed() {
       );
     }
 
+    // Batch size = 5000 rows * 9 params = 45000 params per query (PG limit is 65535).
+    const batchSize = 5000;
     for (const client of CLIENTS) {
       const clientPayments = PAYMENTS.filter(p => p.client_id === client.id);
       const n = ROW_COUNTS[client.id];
-      console.log(`Seeding ${n} orders for client ${client.id}...`);
+      console.log(`Seeding ${n.toLocaleString()} orders for client ${client.id}...`);
+      const startedAt = Date.now();
 
       // Per-BIN approval-rate skew so the analytics output isn't flat.
       const binApprovalRate = Object.fromEntries(BINS.map(b => [b.bin, 0.5 + Math.random() * 0.45]));
 
-      const batchSize = 500;
+      let nextLog = batchSize * 20;
       for (let i = 0; i < n; i += batchSize) {
         const rows = [];
         const params = [];
@@ -133,7 +142,14 @@ async function seed() {
            VALUES ${rows.join(', ')}`,
           params
         );
+        if (i + batchN >= nextLog || i + batchN === n) {
+          const pct = Math.round(((i + batchN) / n) * 100);
+          console.log(`  ${(i + batchN).toLocaleString()} / ${n.toLocaleString()} (${pct}%)`);
+          nextLog += batchSize * 20;
+        }
       }
+      const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+      console.log(`  done in ${elapsed}s`);
     }
 
     console.log('Done.');
