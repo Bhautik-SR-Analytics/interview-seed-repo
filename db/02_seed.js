@@ -3,6 +3,7 @@
 
 require('dotenv').config();
 const { Pool } = require('pg');
+const { from: copyFrom } = require('pg-copy-streams');
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
@@ -107,8 +108,8 @@ async function seed() {
       );
     }
 
-    // Batch size = 5000 rows * 9 params = 45000 params per query (PG limit is 65535).
-    const batchSize = 5000;
+    // Use COPY FROM STDIN for orders. Multi-row INSERT works but at millions
+    // of rows the parser and per-batch fsync overhead dominate; COPY is ~5-10x faster.
     for (const client of CLIENTS) {
       const clientPayments = PAYMENTS.filter(p => p.client_id === client.id);
       const n = ROW_COUNTS[client.id];
@@ -118,36 +119,37 @@ async function seed() {
       // Per-BIN approval-rate skew so the analytics output isn't flat.
       const binApprovalRate = Object.fromEntries(BINS.map(b => [b.bin, 0.5 + Math.random() * 0.45]));
 
-      let nextLog = batchSize * 20;
-      for (let i = 0; i < n; i += batchSize) {
-        const rows = [];
-        const params = [];
-        let p = 1;
-        const batchN = Math.min(batchSize, n - i);
-        for (let j = 0; j < batchN; j++) {
-          const bin = pick(BINS).bin;
-          const pmt = pick(clientPayments);
-          const approved = Math.random() < binApprovalRate[bin];
-          const total = (5 + Math.random() * 200).toFixed(2);
-          const orderId = `ORD-${client.id}-${i + j}`;
-          const declineReason = approved ? null : pick(DECLINE_REASONS);
-          rows.push(
-            `($${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++})`
-          );
-          params.push(orderId, randDate(), pmt.gateway_id, bin, String(pmt.mid), total, approved, declineReason, client.id);
+      const stream = c.query(copyFrom(
+        `COPY data.orders
+           (order_id, date_of_sale, gateway_id, bin, mid_number, order_total, is_approved, decline_reason, client_id)
+         FROM STDIN`
+      ));
+
+      let nextLog = 200_000;
+      for (let i = 0; i < n; i++) {
+        const bin = pick(BINS).bin;
+        const pmt = pick(clientPayments);
+        const approved = Math.random() < binApprovalRate[bin];
+        const total = (5 + Math.random() * 200).toFixed(2);
+        const orderId = `ORD-${client.id}-${i}`;
+        const declineReason = approved ? '\\N' : pick(DECLINE_REASONS);
+        // COPY text format: tab-separated; \N is NULL; t/f for boolean.
+        const row = `${orderId}\t${randDate()}\t${pmt.gateway_id}\t${bin}\t${pmt.mid}\t${total}\t${approved ? 't' : 'f'}\t${declineReason}\t${client.id}\n`;
+        if (!stream.write(row)) {
+          await new Promise(resolve => stream.once('drain', resolve));
         }
-        await c.query(
-          `INSERT INTO data.orders
-             (order_id, date_of_sale, gateway_id, bin, mid_number, order_total, is_approved, decline_reason, client_id)
-           VALUES ${rows.join(', ')}`,
-          params
-        );
-        if (i + batchN >= nextLog || i + batchN === n) {
-          const pct = Math.round(((i + batchN) / n) * 100);
-          console.log(`  ${(i + batchN).toLocaleString()} / ${n.toLocaleString()} (${pct}%)`);
-          nextLog += batchSize * 20;
+        if (i + 1 >= nextLog || i + 1 === n) {
+          const pct = Math.round(((i + 1) / n) * 100);
+          console.log(`  ${(i + 1).toLocaleString()} / ${n.toLocaleString()} (${pct}%)`);
+          nextLog += 200_000;
         }
       }
+      stream.end();
+      await new Promise((resolve, reject) => {
+        stream.on('finish', resolve);
+        stream.on('error', reject);
+      });
+
       const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
       console.log(`  done in ${elapsed}s`);
     }
